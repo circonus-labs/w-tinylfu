@@ -292,6 +292,8 @@ template<
         }
     };
 
+    std::mutex mutex_;
+
     frequency_sketch<K> filter_;
 
     // Maps keys to page positions of the LRU caches pointing to a page.
@@ -318,11 +320,13 @@ public:
 
     int size() const noexcept
     {
+        std::unique_lock ul{mutex_};
         return window_.size() + main_.size();
     }
 
     int capacity() const noexcept
     {
+        std::unique_lock ul{mutex_};
         return window_.capacity() + main_.capacity();
     }
 
@@ -331,6 +335,7 @@ public:
 
     bool contains(const K& key) const noexcept
     {
+        std::unique_lock ul{mutex_};
         return page_map_.find(key) != page_map_.cend();
     }
 
@@ -345,6 +350,7 @@ public:
             throw std::invalid_argument("cache capacity must be greater than zero");
         }
 
+        std::unique_lock ul{mutex_};
         filter_.change_capacity(n);
         window_.set_capacity(window_capacity(n));
         main_.set_capacity(n - window_.capacity());
@@ -355,42 +361,38 @@ public:
 
     std::shared_ptr<V> get(const K& key)
     {
-        filter_.record_access(key);
-        auto it = page_map_.find(key);
-        if(it != page_map_.end())
-        {
-            auto& page = it->second;
-            handle_hit(page);
-            return page->data;
-        }
-        ++num_cache_misses_;
-        return nullptr;
+        std::unique_lock ul{mutex_};
+        return get_nolock(key);
     }
 
     std::shared_ptr<V> operator[](const K& key)
     {
-        return get(key);
+        std::unique_lock ul{mutex_};
+        return get_nolock(key);
     }
 
     template<typename ValueLoader>
     std::shared_ptr<V> get_and_insert_if_missing(const K& key, ValueLoader value_loader)
     {
-        std::shared_ptr<V> value = get(key);
+        std::unique_lock ul{mutex_};
+        std::shared_ptr<V> value = get_nolock(key);
         if(value == nullptr)
         {
             value = std::make_shared<V>(value_loader(key));
-            insert(key, value);
+            insert_nolock(key, value);
         }
         return value;
     }
 
     void insert(K key, V value)
     {
-        insert(std::move(key), std::make_shared<V>(std::move(value)));
+        std::unique_lock ul{mutex_};
+        insert_nolock(std::move(key), std::make_shared<V>(std::move(value)));
     }
 
     void erase(const K& key)
     {
+        std::unique_lock ul{mutex_};
         auto it = page_map_.find(key);
         if(it != page_map_.end())
         {
@@ -404,12 +406,36 @@ public:
     }
 
 private:
+    int size_nolock() const noexcept
+    {
+        return window_.size() + main_.size();
+    }
+
+    int capacity_nolock() const noexcept
+    {
+        return window_.capacity() + main_.capacity();
+    }
+
+    std::shared_ptr<V> get_nolock(const K& key)
+    {
+        filter_.record_access(key);
+        auto it = page_map_.find(key);
+        if(it != page_map_.end())
+        {
+            auto& page = it->second;
+            handle_hit(page);
+            return page->data;
+        }
+        ++num_cache_misses_;
+        return nullptr;
+    }
+
     static int window_capacity(const int total_capacity) noexcept
     {
         return std::max(1, int(std::ceil(0.01f * total_capacity)));
     }
 
-    void insert(const K& key, std::shared_ptr<V> data)
+    void insert_nolock(const K& key, std::shared_ptr<V> data)
     {
         if(window_.is_full()) { evict(); }
 
@@ -439,7 +465,7 @@ private:
      */
     void evict()
     {
-        if(size() >= capacity())
+        if(size_nolock() >= capacity_nolock())
             evict_from_window_or_main();
         else
             main_.transfer_page_from(window_.lru_pos(), window_);
