@@ -371,6 +371,19 @@ public:
         return get_nolock(key);
     }
 
+    template<typename ValueMaker>
+    std::shared_ptr<V> get_and_make_if_missing(const K& key, ValueMaker value_loader)
+    {
+        std::unique_lock ul{mutex_};
+        std::shared_ptr<V> value = get_nolock(key);
+        if(value == nullptr)
+        {
+            value = std::make_shared<V>(value_loader(key));
+            insert_nolock(key, value);
+        }
+        return value;
+    }
+
     template<typename ValueLoader>
     std::shared_ptr<V> get_and_insert_if_missing(const K& key, ValueLoader value_loader)
     {
@@ -378,7 +391,7 @@ public:
         std::shared_ptr<V> value = get_nolock(key);
         if(value == nullptr)
         {
-            value = std::make_shared<V>(value_loader(key));
+            value = value_loader(key);
             insert_nolock(key, value);
         }
         return value;
